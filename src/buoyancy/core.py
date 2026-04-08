@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Generator, Optional
 
 from buoyancy.calibrator import BuoyancyScore, Calibrator
+from buoyancy.classifier import classify
 from buoyancy.memory import DEFAULT_DB_PATH, Memory
 from buoyancy.task import Budget, Complexity, ModelTier, TaskRecord
 
@@ -108,6 +109,12 @@ class Buoyancy:
         if not ctx._recorded:
             # Auto-record with budget as actual if user didn't call record()
             ctx.record(tokens_used=budget.max_tokens, succeeded=True)
+
+    @contextmanager
+    def auto_task(self, name: str, description: str) -> Generator[TaskContext, None, None]:
+        """Context manager that auto-classifies the task from a description."""
+        task_type, complexity = classify(description)
+        yield from self.task(name, task_type, complexity)
 
     def estimate(
         self, task_type: str, complexity: str | Complexity = Complexity.MODERATE

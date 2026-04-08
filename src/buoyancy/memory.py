@@ -169,6 +169,21 @@ class Memory:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def convergence_data(
+        self, task_type: str, complexity: str
+    ) -> list[int]:
+        """Return time series of actual_tokens for a (task_type, complexity) pair.
+
+        Records are returned in chronological order (oldest first).
+        """
+        rows = self._conn.execute(
+            """SELECT actual_tokens FROM task_records
+            WHERE task_type = ? AND complexity = ?
+            ORDER BY timestamp ASC""",
+            (task_type, complexity),
+        ).fetchall()
+        return [r[0] for r in rows]
+
     def get_stats(self) -> dict:
         """Get summary statistics."""
         total = self._conn.execute(

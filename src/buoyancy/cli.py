@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from buoyancy.classifier import classify
 from buoyancy.core import Buoyancy
 from buoyancy.task import Complexity, ModelTier
 
@@ -34,8 +35,20 @@ def main(argv: list[str] | None = None) -> None:
     rec.add_argument("--quality", type=float, default=1.0)
     rec.add_argument("--model-tier", choices=[m.value for m in ModelTier], default="medium")
 
+    # buoyancy classify <description>
+    cls = sub.add_parser("classify", help="Auto-classify a task description")
+    cls.add_argument("description", help="Plain-text task description")
+
     # buoyancy stats
     sub.add_parser("stats", help="Show summary statistics")
+
+    # buoyancy dashboard
+    sub.add_parser("dashboard", help="Show buoyancy dashboard for all task types")
+
+    # buoyancy convergence <task_type> <complexity>
+    conv = sub.add_parser("convergence", help="Show convergence chart for a task type")
+    conv.add_argument("task_type")
+    conv.add_argument("complexity", choices=[c.value for c in Complexity])
 
     args = parser.parse_args(argv)
 
@@ -71,11 +84,26 @@ def main(argv: list[str] | None = None) -> None:
         print(f"  optimal_tokens: {score.optimal_tokens}")
         print(f"  confidence: {score.confidence:.2f} (n={score.sample_count})")
 
+    elif args.command == "classify":
+        task_type, complexity = classify(args.description)
+        print(f"task_type: {task_type}, complexity: {complexity.value}")
+        b.close()
+        return
+
     elif args.command == "stats":
         stats = b._memory.get_stats()
         print("=== Neutral Buoyancy Stats ===")
         for k, v in stats.items():
             print(f"  {k}: {v}")
+
+    elif args.command == "dashboard":
+        from buoyancy.viz import dashboard
+        print(dashboard(b._memory, b._calibrator))
+
+    elif args.command == "convergence":
+        from buoyancy.viz import convergence_chart
+        cal = b._memory.get_calibration(args.task_type, Complexity(args.complexity))
+        print(convergence_chart(b._memory, args.task_type, args.complexity, calibration=cal))
 
     b.close()
 

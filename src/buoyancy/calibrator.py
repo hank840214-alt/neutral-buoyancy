@@ -108,8 +108,9 @@ class Calibrator:
                 + (1 - self.alpha) * old_tokens
             )
         else:
-            # Failed task → increase budget by 20%
-            new_tokens = int(old_tokens * 1.2)
+            # Failed task → increase budget by 20%, capped at 100K
+            MAX_TOKENS_CAP = 100_000
+            new_tokens = min(int(old_tokens * 1.2), MAX_TOKENS_CAP)
 
         # Update buoyancy score via EMA
         new_score = (

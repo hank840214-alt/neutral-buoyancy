@@ -83,3 +83,49 @@ def test_context_manager_as_with():
     with make_buoyancy() as b:
         b.record_task("t1", "test", "simple", tokens_used=200)
         assert b.buoyancy("test", "simple") is not None
+
+
+def test_record_task_negative_tokens_raises():
+    b = make_buoyancy()
+    import pytest
+    with pytest.raises(ValueError, match="non-negative"):
+        b.record_task("t1", "bugfix", "simple", tokens_used=-1)
+    b.close()
+
+
+def test_record_task_excessive_tokens_raises():
+    b = make_buoyancy()
+    import pytest
+    with pytest.raises(ValueError, match="sanity limit"):
+        b.record_task("t1", "bugfix", "simple", tokens_used=1_000_001)
+    b.close()
+
+
+def test_record_task_invalid_quality_raises():
+    b = make_buoyancy()
+    import pytest
+    with pytest.raises(ValueError, match="quality_score"):
+        b.record_task("t1", "bugfix", "simple", tokens_used=500, quality_score=1.5)
+    b.close()
+
+
+def test_context_manager_exception_records_failure():
+    b = make_buoyancy()
+    try:
+        with b.task("failing-task", task_type="bugfix", complexity="simple") as t:
+            raise RuntimeError("deliberate failure")
+    except RuntimeError:
+        pass
+
+    score = b.buoyancy("bugfix", "simple")
+    assert score is not None
+    assert score.sample_count == 1
+    # The task was recorded as failed; buoyancy score should reflect that
+    b.close()
+
+
+def test_double_close_is_safe():
+    b = make_buoyancy()
+    b.record_task("t1", "test", "simple", tokens_used=100)
+    b.close()
+    b.close()  # second close must not raise

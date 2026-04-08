@@ -41,6 +41,13 @@ class TaskContext:
         tool_calls: int = 0,
     ) -> BuoyancyScore:
         """Record the outcome of this task execution."""
+        if tokens_used < 0:
+            raise ValueError("tokens_used must be non-negative")
+        if tokens_used > 1_000_000:
+            raise ValueError("tokens_used exceeds sanity limit (1M)")
+        if not 0.0 <= quality_score <= 1.0:
+            raise ValueError("quality_score must be between 0.0 and 1.0")
+
         elapsed_ms = (time.monotonic_ns() - self._start_time) // 1_000_000
 
         task_record = TaskRecord(
@@ -104,9 +111,16 @@ class Buoyancy:
             calibrator=self._calibrator,
         )
 
-        yield ctx
+        exc_occurred = False
+        try:
+            yield ctx
+        except BaseException:
+            exc_occurred = True
+            if not ctx._recorded:
+                ctx.record(tokens_used=budget.max_tokens, succeeded=False)
+            raise
 
-        if not ctx._recorded:
+        if not exc_occurred and not ctx._recorded:
             # Auto-record with budget as actual if user didn't call record()
             ctx.record(tokens_used=budget.max_tokens, succeeded=True)
 
@@ -114,7 +128,29 @@ class Buoyancy:
     def auto_task(self, name: str, description: str) -> Generator[TaskContext, None, None]:
         """Context manager that auto-classifies the task from a description."""
         task_type, complexity = classify(description)
-        yield from self.task(name, task_type, complexity)
+        budget = self._calibrator.estimate(task_type, complexity)
+        if isinstance(complexity, str):
+            complexity = Complexity(complexity)
+
+        ctx = TaskContext(
+            name=name,
+            task_type=task_type,
+            complexity=complexity,
+            budget=budget,
+            calibrator=self._calibrator,
+        )
+
+        exc_occurred = False
+        try:
+            yield ctx
+        except BaseException:
+            exc_occurred = True
+            if not ctx._recorded:
+                ctx.record(tokens_used=budget.max_tokens, succeeded=False)
+            raise
+
+        if not exc_occurred and not ctx._recorded:
+            ctx.record(tokens_used=budget.max_tokens, succeeded=True)
 
     def estimate(
         self, task_type: str, complexity: str | Complexity = Complexity.MODERATE
@@ -135,6 +171,13 @@ class Buoyancy:
         model_tier: str | ModelTier = ModelTier.MEDIUM,
     ) -> BuoyancyScore:
         """Record a task without using the context manager."""
+        if tokens_used < 0:
+            raise ValueError("tokens_used must be non-negative")
+        if tokens_used > 1_000_000:
+            raise ValueError("tokens_used exceeds sanity limit (1M)")
+        if not 0.0 <= quality_score <= 1.0:
+            raise ValueError("quality_score must be between 0.0 and 1.0")
+
         if isinstance(complexity, str):
             complexity = Complexity(complexity)
         if isinstance(model_tier, str):
@@ -197,6 +240,15 @@ class Buoyancy:
             )
 
         return "\n".join(lines)
+
+
+    def prune(self, older_than_days: int = 90) -> int:
+        """Delete old records to keep calibration fresh."""
+        return self._memory.prune(older_than_days)
+
+    def reset(self, task_type: str | None = None) -> int:
+        """Reset calibration. Optionally for a specific task type only."""
+        return self._memory.reset(task_type)
 
     def close(self):
         self._memory.close()

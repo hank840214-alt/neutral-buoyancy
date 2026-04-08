@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -57,38 +59,53 @@ class Memory:
 
     def __init__(self, db_path: Optional[Path] = None):
         self.db_path = db_path or DEFAULT_DB_PATH
+        self._lock = threading.Lock()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self.db_path))
+        try:
+            os.chmod(self.db_path.parent, 0o700)
+        except OSError:
+            pass  # May fail on some filesystems, non-critical
+        is_new_db = not self.db_path.exists()
+        self._conn = sqlite3.connect(str(self.db_path), timeout=30, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
         self._conn.executescript(_SCHEMA)
+        if is_new_db:
+            try:
+                os.chmod(self.db_path, 0o600)
+            except OSError:
+                pass
 
     def record(self, task: TaskRecord) -> int:
         """Store a task execution record. Returns the record ID."""
-        cursor = self._conn.execute(
-            """INSERT INTO task_records
-            (task_name, task_type, complexity, fingerprint,
-             estimated_tokens, estimated_model_tier,
-             actual_tokens, actual_model_tier, actual_tool_calls, duration_ms,
-             succeeded, quality_score, buoyancy_delta, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                task.task_name,
-                task.task_type,
-                task.complexity.value,
-                task.fingerprint,
-                task.estimated_tokens,
-                task.estimated_model_tier.value,
-                task.actual_tokens,
-                task.actual_model_tier.value,
-                task.actual_tool_calls,
-                task.duration_ms,
-                task.succeeded,
-                task.quality_score,
-                task.buoyancy_delta,
-                task.timestamp.isoformat(),
-            ),
-        )
-        self._conn.commit()
+        task.task_name = task.task_name[:200] if task.task_name else ""
+        task.task_type = task.task_type[:50] if task.task_type else "unknown"
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                """INSERT INTO task_records
+                (task_name, task_type, complexity, fingerprint,
+                 estimated_tokens, estimated_model_tier,
+                 actual_tokens, actual_model_tier, actual_tool_calls, duration_ms,
+                 succeeded, quality_score, buoyancy_delta, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task.task_name,
+                    task.task_type,
+                    task.complexity.value,
+                    task.fingerprint,
+                    task.estimated_tokens,
+                    task.estimated_model_tier.value,
+                    task.actual_tokens,
+                    task.actual_model_tier.value,
+                    task.actual_tool_calls,
+                    task.duration_ms,
+                    task.succeeded,
+                    task.quality_score,
+                    task.buoyancy_delta,
+                    task.timestamp.isoformat(),
+                ),
+            )
         return cursor.lastrowid  # type: ignore[return-value]
 
     def get_history(
@@ -137,30 +154,30 @@ class Memory:
     ) -> None:
         """Upsert calibration data."""
         now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            """INSERT INTO calibration
-            (task_type, complexity, optimal_tokens, optimal_model_tier,
-             buoyancy_score, confidence, sample_count, last_updated)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(task_type, complexity) DO UPDATE SET
-                optimal_tokens = excluded.optimal_tokens,
-                optimal_model_tier = excluded.optimal_model_tier,
-                buoyancy_score = excluded.buoyancy_score,
-                confidence = excluded.confidence,
-                sample_count = excluded.sample_count,
-                last_updated = excluded.last_updated""",
-            (
-                task_type,
-                complexity.value,
-                optimal_tokens,
-                optimal_model_tier.value,
-                buoyancy_score,
-                confidence,
-                sample_count,
-                now,
-            ),
-        )
-        self._conn.commit()
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO calibration
+                (task_type, complexity, optimal_tokens, optimal_model_tier,
+                 buoyancy_score, confidence, sample_count, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_type, complexity) DO UPDATE SET
+                    optimal_tokens = excluded.optimal_tokens,
+                    optimal_model_tier = excluded.optimal_model_tier,
+                    buoyancy_score = excluded.buoyancy_score,
+                    confidence = excluded.confidence,
+                    sample_count = excluded.sample_count,
+                    last_updated = excluded.last_updated""",
+                (
+                    task_type,
+                    complexity.value,
+                    optimal_tokens,
+                    optimal_model_tier.value,
+                    buoyancy_score,
+                    confidence,
+                    sample_count,
+                    now,
+                ),
+            )
 
     def get_all_calibrations(self) -> list[dict]:
         """Get all calibration entries."""
@@ -201,8 +218,32 @@ class Memory:
             "calibrated_pairs": calibrated,
         }
 
+
+    def prune(self, older_than_days: int = 90) -> int:
+        """Delete task records older than N days. Returns count deleted."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+        with self._lock, self._conn:
+            cursor = self._conn.execute(
+                "DELETE FROM task_records WHERE timestamp < ?", (cutoff,)
+            )
+            return cursor.rowcount
+
+    def reset(self, task_type: str | None = None) -> int:
+        """Reset calibration data. If task_type given, only reset that type. Returns count deleted."""
+        with self._lock, self._conn:
+            if task_type:
+                c1 = self._conn.execute("DELETE FROM calibration WHERE task_type = ?", (task_type,))
+                c2 = self._conn.execute("DELETE FROM task_records WHERE task_type = ?", (task_type,))
+                return c1.rowcount + c2.rowcount
+            else:
+                c1 = self._conn.execute("DELETE FROM calibration")
+                c2 = self._conn.execute("DELETE FROM task_records")
+                return c1.rowcount + c2.rowcount
+
     def close(self):
-        self._conn.close()
+        if self._conn:
+            self._conn.close()
+            self._conn = None
 
     def _row_to_record(self, row: sqlite3.Row) -> TaskRecord:
         return TaskRecord(

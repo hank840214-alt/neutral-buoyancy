@@ -50,6 +50,14 @@ def main(argv: list[str] | None = None) -> None:
     conv.add_argument("task_type")
     conv.add_argument("complexity", choices=[c.value for c in Complexity])
 
+    # buoyancy prune [--days 90]
+    prune = sub.add_parser("prune", help="Delete records older than N days")
+    prune.add_argument("--days", type=int, default=90, help="Age threshold in days (default: 90)")
+
+    # buoyancy reset [--type TASK_TYPE]
+    rst = sub.add_parser("reset", help="Reset calibration data")
+    rst.add_argument("--type", dest="task_type", default=None, help="Only reset this task type")
+
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -104,6 +112,17 @@ def main(argv: list[str] | None = None) -> None:
         from buoyancy.viz import convergence_chart
         cal = b._memory.get_calibration(args.task_type, Complexity(args.complexity))
         print(convergence_chart(b._memory, args.task_type, args.complexity, calibration=cal))
+
+    elif args.command == "prune":
+        deleted = b.prune(args.days)
+        print(f"Pruned {deleted} record(s) older than {args.days} day(s).")
+
+    elif args.command == "reset":
+        deleted = b.reset(args.task_type)
+        if args.task_type:
+            print(f"Reset {deleted} record(s) for task type '{args.task_type}'.")
+        else:
+            print(f"Reset {deleted} record(s) (all calibration data cleared).")
 
     b.close()
 
